@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-display: var(--font-playfair), Georgia, serif;
+
+  /* "Christmas market" palette: holly green, lantern gold, market red */
+  --color-pine-950: #185236;
+  --color-pine-900: #206641;
+  --color-pine-800: #27764b;
+  --color-pine-700: #2d8556;
+  --color-paper: #fbfaf6;
+  --color-ink: #22312b;
+  --color-gold-300: #f2d489;
+  --color-gold-400: #e8b84b;
+  --color-gold-500: #d5a233;
+  --color-berry-600: #c2392e;
+  --color-berry-700: #a52d24;
+}

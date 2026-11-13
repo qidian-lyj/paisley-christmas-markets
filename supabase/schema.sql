@@ -1,0 +1,280 @@
+-- ============================================================
+-- Paisley Christmas Markets — proof-of-concept schema
+-- Run this once in: Supabase Dashboard → SQL Editor → New query
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 1. PROFILES — app data for each authenticated user
+-- ------------------------------------------------------------
+create table public.profiles (
+  id uuid primary key references auth.users (id) on delete cascade,
+  full_name text,
+  role text not null default 'trader' check (role in ('trader', 'admin')),
+  created_at timestamptz not null default now()
+);
+
+-- Create a profile automatically whenever someone signs up
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (id, full_name)
+  values (new.id, coalesce(new.raw_user_meta_data ->> 'full_name', new.email));
+  return new;
+end;
+$$;
+
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row
+  execute procedure public.handle_new_user();
+
+-- Admin helper. security definer so RLS policies can call it
+-- without infinite recursion on the profiles table.
+create or replace function public.is_admin()
+returns boolean
+language sql
+stable
+security definer set search_path = public
+as $$
+  select exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  );
+$$;
+
+-- Stop traders promoting themselves to admin via the API.
+-- Changes made directly on the database (SQL Editor / migrations) carry no
+-- JWT, so auth.uid() is null there and are trusted by design.
+create or replace function public.protect_role()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  if auth.uid() is null then
+    return new;
+  end if;
+  if not public.is_admin() and new.role is distinct from old.role then
+    raise exception 'Only admins can change roles';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger protect_profile_role
+  before update on public.profiles
+  for each row
+  execute procedure public.protect_role();
+
+-- ------------------------------------------------------------
+-- 2. MARKETS — one row per market event run by the group
+-- ------------------------------------------------------------
+create table public.markets (
+  id bigint generated always as identity primary key,
+  title text not null,
+  description text,
+  start_date date not null,
+  end_date date not null,
+  location text,
+  created_at timestamptz not null default now()
+);
+
+-- ------------------------------------------------------------
+-- 3. APPLICATIONS — traders apply to participate
+-- ------------------------------------------------------------
+create table public.applications (
+  id bigint generated always as identity primary key,
+  user_id uuid references public.profiles (id) on delete set null,
+  business_name text not null,
+  contact_name text not null,
+  email text not null,
+  phone text,
+  category text not null check (category in
+    ('food', 'drink', 'crafts', 'gifts', 'charity', 'other')),
+  pitch text not null,
+  price_info text,
+  status text not null default 'pending'
+    check (status in ('pending', 'approved', 'rejected')),
+  reviewed_by uuid references public.profiles (id),
+  created_at timestamptz not null default now()
+);
+
+-- ------------------------------------------------------------
+-- 4. STALLS — approved traders, shown on the public site
+-- ------------------------------------------------------------
+create table public.stalls (
+  id bigint generated always as identity primary key,
+  market_id bigint references public.markets (id) on delete cascade,
+  application_id bigint references public.applications (id) on delete set null,
+  trader_id uuid references public.profiles (id) on delete set null,
+  name text not null,
+  category text not null,
+  description text,
+  image_url text,
+  contact_email text,
+  contact_phone text,
+  price_info text,
+  approved boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- ------------------------------------------------------------
+-- 5. EVENTS — the market programme
+-- ------------------------------------------------------------
+create table public.events (
+  id bigint generated always as identity primary key,
+  market_id bigint references public.markets (id) on delete cascade,
+  title text not null,
+  description text,
+  scheduled_at timestamptz not null,
+  location text
+);
+
+-- ============================================================
+-- ROW LEVEL SECURITY — GDPR: users only see their own data
+-- ============================================================
+alter table public.profiles enable row level security;
+alter table public.markets enable row level security;
+alter table public.applications enable row level security;
+alter table public.stalls enable row level security;
+alter table public.events enable row level security;
+
+-- profiles
+create policy "read own profile or admin" on public.profiles
+  for select using (auth.uid() = id or public.is_admin());
+
+create policy "update own profile" on public.profiles
+  for update using (auth.uid() = id) with check (auth.uid() = id);
+
+create policy "admin updates any profile" on public.profiles
+  for update using (public.is_admin()) with check (public.is_admin());
+
+-- markets & events: public content, maintained by admins
+create policy "public read markets" on public.markets
+  for select using (true);
+
+create policy "admin manages markets" on public.markets
+  for all using (public.is_admin()) with check (public.is_admin());
+
+create policy "public read events" on public.events
+  for select using (true);
+
+create policy "admin manages events" on public.events
+  for all using (public.is_admin()) with check (public.is_admin());
+
+-- stalls: everyone sees approved ones; traders manage their own
+create policy "public read approved stalls" on public.stalls
+  for select using (approved or public.is_admin() or trader_id = auth.uid());
+
+create policy "trader updates own stall" on public.stalls
+  for update using (trader_id = auth.uid()) with check (trader_id = auth.uid());
+
+create policy "admin manages stalls" on public.stalls
+  for all using (public.is_admin()) with check (public.is_admin());
+
+-- applications: applicants see only their own; admins see all
+create policy "trader submits own application" on public.applications
+  for insert with check (auth.uid() = user_id);
+
+create policy "read own application or admin" on public.applications
+  for select using (auth.uid() = user_id or public.is_admin());
+
+create policy "trader edits own pending application" on public.applications
+  for update using (auth.uid() = user_id and status = 'pending')
+  with check (auth.uid() = user_id and status = 'pending');
+
+create policy "admin reviews applications" on public.applications
+  for update using (public.is_admin()) with check (public.is_admin());
+
+-- ============================================================
+-- SEED DATA — enough content to demo the site immediately
+-- ============================================================
+insert into public.markets (title, description, start_date, end_date, location)
+values (
+  'Paisley Christmas Markets 2026',
+  'A traditional German-style Christmas market in the heart of Paisley.
+   Festive food, handcrafted gifts, mulled wine and family entertainment
+   across three festive weeks.',
+  '2026-12-04', '2026-12-25', 'Paisley Abbey & County Square'
+);
+
+insert into public.events (market_id, title, description, scheduled_at, location)
+values
+  (1, 'Lights Switch-On',
+   'Join the Provost as Paisley glows into life for Christmas.',
+   '2026-12-04 17:30+00', 'Abbey Forecourt'),
+  (1, 'Carol Concert',
+   'Carols from local school choirs under the tree canopy.',
+   '2026-12-08 18:00+00', 'County Square Stage'),
+  (1, 'Santa''s Grotto',
+   'Meet Santa and receive a small gift. Free, ticketed on the day.',
+   '2026-12-12 11:00+00', 'The Old Sneddon'),
+  (1, 'Mulled Wine Masterclass',
+   'Learn the secrets of Glühwein with our market traders.',
+   '2026-12-18 19:00+00', 'Market Marquee'),
+  (1, 'Christmas Eve Baked Apples & Carols',
+   'Warm baked apples stuffed with cinnamon, honey and rum-soaked raisins, served with mulled cider and carols around the tree as we count down to the big day.',
+   '2026-12-24 18:00+00', 'Market Marquee');
+
+insert into public.stalls (market_id, name, category, description, approved, image_url, contact_email, contact_phone, price_info)
+values
+  (1, 'Highland Bakehouse', 'food', 'Stollen, waffles and festive bakes from the west coast.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/32/Christmas-stollen-1768907_1920.jpg/1280px-Christmas-stollen-1768907_1920.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'info@highland-bakehouse.co.uk', '07700 900210', '£2.50 – £6'),
+  (1, 'Bratwurst Haus', 'food', 'Flame-grilled bratwurst and currywurst with sauerkraut.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/2/2d/Currywurst-1.jpg/1280px-Currywurst-1.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@bratwurst-haus.co.uk', '0141 848 2111', '£5 – £7.50'),
+  (1, 'Wee Waffle Window', 'food', 'Fresh Liege waffles with chocolate or caramel dust.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/c/cf/Waffle_with_strawberries_and_confectioner%27s_sugar.jpg/1280px-Waffle_with_strawberries_and_confectioner%27s_sugar.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'orders@wee-waffle-window.co.uk', '07700 900212', '£4 – £6.50'),
+  (1, 'Roasty Chestnut Co.', 'food', 'Paper bags of hot roasted chestnuts, straight from the grill.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/4/40/Gebrannte_Mandeln.JPG/1280px-Gebrannte_Mandeln.JPG?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'team@roasty-chestnut-co.co.uk', '0141 848 2113', '£3.50 – £5'),
+  (1, 'The Gluhwein Wagon', 'drink', 'Traditional mulled wine, apple punch and hot chocolate.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/4/47/Gl%C3%BChwein_%28hot_mulled_wine%29_in_a_glass_with_an_orange_slice_03.jpg/1280px-Gl%C3%BChwein_%28hot_mulled_wine%29_in_a_glass_with_an_orange_slice_03.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'info@the-gluhwein-wagon.co.uk', '07700 900214', '£4.50 – £6'),
+  (1, 'Bothy Hot Chocolate', 'drink', 'Velvet hot chocolate topped with marshmallow snow.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/9/92/Hot_chocolate_with_whipped_cream_and_dried_berries_%28Vegan%2C_KETO%2C_LCHF%2C_Low_Carb%2C_Gluten_free%2C_FIT%29_-_52774784724.jpg/1280px-Hot_chocolate_with_whipped_cream_and_dried_berries_%28Vegan%2C_KETO%2C_LCHF%2C_Low_Carb%2C_Gluten_free%2C_FIT%29_-_52774784724.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@bothy-hot-chocolate.co.uk', '0141 848 2115', '£3 – £4.50'),
+  (1, 'Mulled Cider Mill', 'drink', 'Warm Scottish cider steeped with spice and orange peel.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/4/45/Apple_wine_in_a_glass.jpg/1280px-Apple_wine_in_a_glass.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'orders@mulled-cider-mill.co.uk', '07700 900216', '£4 – £5.50'),
+  (1, 'Kinderpunsch Stand', 'drink', 'Alcohol-free punch for the little ones, served steaming.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/9/95/Weihnachtsmarkt_Ffm_2009_Weihnachtspunsch_DSCF8531.jpg/1280px-Weihnachtsmarkt_Ffm_2009_Weihnachtspunsch_DSCF8531.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'team@kinderpunsch-stand.co.uk', '0141 848 2117', '£2.50 – £4'),
+  (1, 'Gauze Glass Studio', 'crafts', 'Hand-blown glass baubles, made in Renfrewshire.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/c/ce/Christmas_baubles_08_-_02.JPG/1280px-Christmas_baubles_08_-_02.JPG?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'info@gauze-glass-studio.co.uk', '07700 900218', '£8 – £35'),
+  (1, 'Renfrewshire Woodcraft', 'crafts', 'Carved spoons, wands and ornaments from fallen local timber.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/2/23/A_little_Christmas_tree_made_of_wood.jpg/1280px-A_little_Christmas_tree_made_of_wood.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@renfrewshire-woodcraft.co.uk', '0141 848 2119', '£6 – £40'),
+  (1, 'Thistle & Thread', 'crafts', 'Embroidered decorations stitched in the Paisley pattern.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/9/9c/Feather_Stitch_Green%2C_Blue%2C_and_Grey_Embroidery_Hoop_Art._Hand_Embroidered._%288355465843%29.jpg/1280px-Feather_Stitch_Green%2C_Blue%2C_and_Grey_Embroidery_Hoop_Art._Hand_Embroidered._%288355465843%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'orders@thistle-and-thread.co.uk', '07700 900220', '£5 – £25'),
+  (1, 'Clay Bothy Pottery', 'crafts', 'Hand-thrown mugs and little villages of ceramic houses.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/d1/Potter_shaping_clay_on_a_traditional_manual_potter%E2%80%99s_wheel_in_India_01.jpg/1280px-Potter_shaping_clay_on_a_traditional_manual_potter%E2%80%99s_wheel_in_India_01.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'team@clay-bothy-pottery.co.uk', '0141 848 2121', '£10 – £45'),
+  (1, 'Wee Woolly Knits', 'gifts', 'Scottish wool hats, scarves and mittens.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/df/Garter_stitch_mittens.jpg/1280px-Garter_stitch_mittens.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'info@wee-woolly-knits.co.uk', '07700 900222', '£10 – £35'),
+  (1, 'Paisley Pattern Printworks', 'gifts', 'Prints and teatowels celebrating the famous Paisley pattern.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/6/6b/Paisley_pattern_BK-NM-3658.jpg/1280px-Paisley_pattern_BK-NM-3658.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@paisley-pattern-printworks.co.uk', '0141 848 2123', '£6 – £20'),
+  (1, 'Sweetie Jar Emporium', 'gifts', 'Victorian jars filled with clootie dumpling fudge.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a7/Pick_%27n%27_Mix.jpg/1280px-Pick_%27n%27_Mix.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'orders@sweetie-jar-emporium.co.uk', '07700 900224', '£4 – £15'),
+  (1, 'Hamper & Hearth', 'gifts', 'Ready-made hampers of Scottish pantry treats.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/6/65/Nanjala_073_Shlumbergera_Cactus_in_Basket.jpg/1280px-Nanjala_073_Shlumbergera_Cactus_in_Basket.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'team@hamper-and-hearth.co.uk', '0141 848 2125', '£15 – £50'),
+  (1, 'Paisley Foodbank', 'charity', 'Donate a tin, take a candy cane.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/6/6a/St_Andrew%27s_church%2C_Totteridge%2C_foodbank_collection_point_July_2018.jpg/1280px-St_Andrew%27s_church%2C_Totteridge%2C_foodbank_collection_point_July_2018.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@paisley-foodbank.org.uk', '07700 900226', 'Donations welcome'),
+  (1, 'RNLI Christmas Appeal', 'charity', 'Lifeboat crew collecting for the Christmas appeal.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/36/RNLI_Lifeboat_Dartmouth.jpg/1280px-RNLI_Lifeboat_Dartmouth.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@rnli-christmas-appeal.org.uk', '0141 848 2127', 'Donations welcome'),
+  (1, 'Toy Collection Trolley', 'charity', 'Drop a new toy in the trolley for local families.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/7/77/The_story_of_a_plush_bear_%281921%29_%2814749709631%29.jpg/1280px-The_story_of_a_plush_bear_%281921%29_%2814749709631%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@toy-collection-trolley.org.uk', '07700 900228', 'Donations welcome'),
+  (1, 'Mary''s Meals Fundraiser', 'charity', 'Sponsor a school meal for a child with every donation.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/2/28/Bake_sale_foods.jpg/1280px-Bake_sale_foods.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@marys-meals-fundraiser.org.uk', '0141 848 2129', 'Donations welcome'),
+  (1, 'The Wrapping Booth', 'other', 'Gifts wrapped in paper and ribbon while you shop.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/e/eb/Gift_Wrapping_Station.jpg/1280px-Gift_Wrapping_Station.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'info@the-wrapping-booth.co.uk', '07700 900230', '£2 – £5 per gift'),
+  (1, 'Grotto Ticket Office', 'other', 'Book your slot to visit Santa in his grotto.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/9/9a/Christmas_Market_Kaiserslautern_2009_Santa_Claus.jpg/1280px-Christmas_Market_Kaiserslautern_2009_Santa_Claus.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@grotto-ticket-office.co.uk', '0141 848 2131', 'Adults £3, children £8'),
+  (1, 'Face Painting by Fiona', 'other', 'Festive faces: snowflakes, reindeer and glitter.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/a/ad/Face_painting_-_DC_Capital_Pride_street_festival_-_2013-06-09_%289009315771%29.jpg/1280px-Face_painting_-_DC_Capital_Pride_street_festival_-_2013-06-09_%289009315771%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'orders@face-painting-by-fiona.co.uk', '07700 900232', '£4 – £8 per design'),
+  (1, 'Fairground Carousel', 'other', 'Traditional carousel rides beside the Abbey.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/6/6f/Christmas_market_carousel_-_Frankfurt_am_Main%2C_Germany_-_DSC04142.jpg/1280px-Christmas_market_carousel_-_Frankfurt_am_Main%2C_Germany_-_DSC04142.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'team@fairground-carousel.co.uk', '0141 848 2133', 'Adults £3, children £2'),
+  (1, 'Poffertjes Parlour', 'food', 'Fluffy Dutch mini pancakes dusted with icing sugar.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/4/42/Poffertjes_001.jpg/1280px-Poffertjes_001.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'info@poffertjes-parlour.co.uk', '07700 900234', '£4 – £6'),
+  (1, 'Caramel Apple Stand', 'food', 'Crisp apples dipped in glossy caramel, made fresh daily.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/f/fe/Candy_apples_in_a_row.jpg/1280px-Candy_apples_in_a_row.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@caramel-apple-stand.co.uk', '0141 848 2135', '£3 – £4.50'),
+  (1, 'Highland Gin Toddy', 'drink', 'Warm winter toddies with Scottish gin, honey and lemon.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/b/bb/Hot_toddy_%281%29.jpg/1280px-Hot_toddy_%281%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'orders@highland-gin-toddy.co.uk', '07700 900236', '£6 – £8'),
+  (1, 'Eggnog Nook', 'drink', 'Creamy eggnog served warm or chilled, topped with nutmeg.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/1/1a/Glass_of_eggnog_with_cinnamon_01.jpg/1280px-Glass_of_eggnog_with_cinnamon_01.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'team@eggnog-nook.co.uk', '0141 848 2137', '£3.50 – £5'),
+  (1, 'Festive Wreath Workshop', 'crafts', 'Door wreaths woven from pine, holly and dried orange.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/b/ba/2023_Adventskranz_5.jpg/1280px-2023_Adventskranz_5.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'info@festive-wreath-workshop.co.uk', '07700 900238', '£12 – £30'),
+  (1, 'Candlemakers'' Corner', 'crafts', 'Beeswax candles rolled and dipped in front of you.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/1/17/Candlestock_in_Woodstock%2C_NY_-_55293583400.jpg/1280px-Candlestock_in_Woodstock%2C_NY_-_55293583400.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@candlemakers-corner.co.uk', '0141 848 2139', '£3 – £18'),
+  (1, 'Advent Calendar Attic', 'gifts', 'Fill-your-own advent calendars and countdown boxes.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/8/80/V%C3%B6r%C3%B6smarty_Square%2C_Gerbeaud%2C_2008_Budapest%2C_Advent_calendar_-_panoramio.jpg/1280px-V%C3%B6r%C3%B6smarty_Square%2C_Gerbeaud%2C_2008_Budapest%2C_Advent_calendar_-_panoramio.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'orders@advent-calendar-attic.co.uk', '07700 900240', '£5 – £22'),
+  (1, 'Mistletoe & Holly Bunches', 'gifts', 'Fresh mistletoe and holly bunches, tied to order.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/0/07/Big_Bunches_of_Mistletoe_-_geograph.org.uk_-_7100099.jpg/1280px-Big_Bunches_of_Mistletoe_-_geograph.org.uk_-_7100099.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'team@mistletoe-and-holly-bunches.co.uk', '0141 848 2141', '£3 – £10'),
+  (1, 'Salvation Army Band', 'charity', 'Carols from the Salvation Army band, collecting for the appeal.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c3/Salvation_Army_Brass_Band_in_Bullring_122_C.jpg/1280px-Salvation_Army_Brass_Band_in_Bullring_122_C.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@salvation-army-band.org.uk', '07700 900242', 'Donations welcome'),
+  (1, 'Guide Dogs Collection', 'charity', 'Meet the puppies in training and support the guide dogs.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/2/20/Guide_dog.jpg/1280px-Guide_dog.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'hello@guide-dogs-collection.org.uk', '0141 848 2143', 'Donations welcome'),
+  (1, 'Open-Air Ice Rink Tickets', 'other', 'Book a skate session on the open-air rink beside the Abbey.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/38/Weihnachtsmarkt_in_Hamm_mit_Eisbahn_%2810561455375%29.jpg/1280px-Weihnachtsmarkt_in_Hamm_mit_Eisbahn_%2810561455375%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'orders@open-air-ice-rink-tickets.co.uk', '07700 900244', 'Adults £9, children £6.50'),
+  (1, 'Christmas Lights Trail', 'other', 'Pick up the map for the illuminated trail through town.', true, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/d8/Adliswil_christmas_lights_1_20211213.jpg/1280px-Adliswil_christmas_lights_1_20211213.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail', 'team@christmas-lights-trail.co.uk', '0141 848 2145', 'Adults £5, children £3');
+
+-- Demo applications so the admin dashboard has something to review
+insert into public.applications
+  (business_name, contact_name, email, phone, category, pitch, price_info, status)
+values
+  ('Loch Lomond Honey Farm', 'Morag Ferguson', 'morag@lochlomondhoneyfarm.co.uk', '07700 900789', 'food', 'Raw Scottish honey, honeycomb chunks and warming honey mead from our hives on the Loch Lomond islands.', '£5 – £18', 'pending'),
+  ('Churros del Sol', 'Diego Alvarez', 'diego@churrosdelsol.co.uk', '07700 900456', 'food', 'Fresh churros with chocolate and salted caramel dips.', '£4 – £6.50', 'pending'),
+  ('Argyll Leathercraft', 'Iain Buchanan', 'iain@argyllleathercraft.co.uk', '07700 900321', 'crafts', 'Hand-stitched belts and journal covers, embossed while you wait.', '£15 – £60', 'pending'),
+  ('Silver & Selkie Jewellery', 'Catriona Bell', 'catriona@silverandselkie.co.uk', '07700 900654', 'gifts', 'Handmade silver pieces inspired by Scottish sea myths and the Selkie legend.', '£25 – £80', 'pending'),
+  ('Prosecco & Frost Bar', 'Sofia Rossi', 'sofia@proseccoandfrost.co.uk', '07700 900987', 'drink', 'Chilled prosecco and festive fizz by the glass, right beside the bandstand.', '£6 – £9', 'pending'),
+  ('Storytelling Yurt', 'Angus MacLeod', 'angus@storytellingyurt.co.uk', '07700 900258', 'other', 'Traditional Scottish winter tales in a heated yurt, every evening at six.', 'Adults £4, children £2', 'pending');
+
+-- ============================================================
+-- PROMOTING AN ADMIN
+-- 1) Register an account in the app (e.g. admin@example.com)
+-- 2) Run this in the SQL Editor:
+--
+--    update public.profiles
+--    set role = 'admin'
+--    where id = (select id from auth.users where email = 'admin@example.com');
+-- ============================================================
