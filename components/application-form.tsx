@@ -176,13 +176,22 @@ export function ApplicationForm() {
           <label htmlFor="photo" className={labelClass}>
             Stall photo
           </label>
+          <div className="mt-1.5 flex items-center gap-3">
+            <label
+              htmlFor="photo"
+              className="cursor-pointer rounded-md bg-pine-700 px-3 py-2 text-sm font-medium text-paper transition-colors hover:bg-pine-800"
+            >
+              Choose photo
+            </label>
+            <span className="text-xs text-ink/55">JPG, PNG or WebP — up to 5 MB</span>
+          </div>
           <input
             id="photo"
             name="photo"
             type="file"
             accept="image/*"
+            className="sr-only"
             onChange={handlePhotoChange}
-            className="mt-1.5 block w-full text-sm text-ink file:mr-3 file:rounded-md file:border-0 file:bg-pine-700 file:px-3 file:py-2 file:text-sm file:font-medium file:text-paper hover:file:bg-pine-800"
           />
           {photoUploading && (
             <p className="mt-1.5 text-xs text-ink/55">Uploading photo…</p>
@@ -199,10 +208,6 @@ export function ApplicationForm() {
               {photoError}
             </p>
           )}
-          <p className="mt-1.5 text-xs text-ink/55">
-            A photo of your stall or products (JPG/PNG, up to 5 MB). Shown on
-            your public listing once approved.
-          </p>
           <input type="hidden" name="image_url" value={photoUrl ?? ""} />
         </div>
         <div className="sm:col-span-2">
