@@ -50,9 +50,19 @@ export default async function AdminApplicationsPage() {
                   </span>
                 </div>
 
-                <p className="mt-3 max-w-3xl leading-relaxed text-ink/75">
-                  {application.pitch}
-                </p>
+                <div className="mt-3 flex items-start gap-4">
+                  {application.image_url && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={application.image_url}
+                      alt={`${application.business_name} photo`}
+                      className="h-24 w-36 flex-none rounded-md object-cover"
+                    />
+                  )}
+                  <p className="max-w-3xl leading-relaxed text-ink/75">
+                    {application.pitch}
+                  </p>
+                </div>
 
                 {application.price_info && (
                   <p className="mt-2 text-xs font-medium text-pine-800">

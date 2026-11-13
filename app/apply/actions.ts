@@ -29,6 +29,7 @@ export async function submitApplicationAction(
   const category = String(formData.get("category") ?? "") as TraderCategory;
   const pitch = String(formData.get("pitch") ?? "").trim();
   const price_info = String(formData.get("price_info") ?? "").trim();
+  const image_url = String(formData.get("image_url") ?? "").trim();
 
   if (!business_name || !contact_name || !email || !pitch) {
     return { error: "Fill in every required field to submit." };
@@ -50,6 +51,9 @@ export async function submitApplicationAction(
   if (price_info.length > 60) {
     return { error: "Keep the pricing note under 60 characters." };
   }
+  if (!image_url.startsWith("https://")) {
+    return { error: "Please upload a photo of your stall before submitting." };
+  }
 
   const { error } = await supabase.from("applications").insert({
     user_id: user.id,
@@ -60,6 +64,7 @@ export async function submitApplicationAction(
     category,
     pitch,
     price_info: price_info || null,
+    image_url,
     status: "pending",
   });
 

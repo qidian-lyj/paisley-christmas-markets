@@ -48,6 +48,7 @@ export type Application = {
   category: TraderCategory;
   pitch: string;
   price_info: string | null;
+  image_url: string | null;
   status: ApplicationStatus;
   reviewed_by: string | null;
   created_at: string;

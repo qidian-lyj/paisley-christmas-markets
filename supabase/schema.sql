@@ -96,6 +96,7 @@ create table public.applications (
     ('food', 'drink', 'crafts', 'gifts', 'charity', 'other')),
   pitch text not null,
   price_info text,
+  image_url text,
   status text not null default 'pending'
     check (status in ('pending', 'approved', 'rejected')),
   reviewed_by uuid references public.profiles (id),
@@ -268,6 +269,34 @@ values
   ('Silver & Selkie Jewellery', 'Catriona Bell', 'catriona@silverandselkie.co.uk', '07700 900654', 'gifts', 'Handmade silver pieces inspired by Scottish sea myths and the Selkie legend.', '£25 – £80', 'pending'),
   ('Prosecco & Frost Bar', 'Sofia Rossi', 'sofia@proseccoandfrost.co.uk', '07700 900987', 'drink', 'Chilled prosecco and festive fizz by the glass, right beside the bandstand.', '£6 – £9', 'pending'),
   ('Storytelling Yurt', 'Angus MacLeod', 'angus@storytellingyurt.co.uk', '07700 900258', 'other', 'Traditional Scottish winter tales in a heated yurt, every evening at six.', 'Adults £4, children £2', 'pending');
+
+-- ============================================================
+-- 6. STORAGE — application photos
+-- Public bucket; traders may only upload inside their own folder
+-- (storage.foldername(name)[1] = auth.uid()).
+-- ============================================================
+insert into storage.buckets (id, name, public)
+values ('application-photos', 'application-photos', true)
+on conflict (id) do nothing;
+
+create policy "public read application photos"
+on storage.objects for select to public
+using (bucket_id = 'application-photos');
+
+create policy "trader uploads own application photo"
+on storage.objects for insert to authenticated
+with check (
+  bucket_id = 'application-photos'
+  and (storage.foldername(name))[1] = auth.uid()::text
+);
+
+create policy "trader updates own application photos"
+on storage.objects for update to authenticated
+using (bucket_id = 'application-photos' and (storage.foldername(name))[1] = auth.uid()::text);
+
+create policy "trader deletes own application photos"
+on storage.objects for delete to authenticated
+using (bucket_id = 'application-photos' and (storage.foldername(name))[1] = auth.uid()::text);
 
 -- ============================================================
 -- PROMOTING AN ADMIN

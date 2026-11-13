@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import {
   submitApplicationAction,
   type ApplicationFormState,
 } from "@/app/apply/actions";
 import { CATEGORY_LABELS, TRADER_CATEGORIES } from "@/lib/types";
+import { createClient } from "@/lib/supabase/client";
 import { errorClass, inputClass, labelClass } from "@/components/form-controls";
 
 export function ApplicationForm() {
@@ -14,6 +15,52 @@ export function ApplicationForm() {
     ApplicationFormState,
     FormData
   >(submitApplicationAction, null);
+
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+
+  async function handlePhotoChange(
+    event: React.ChangeEvent<HTMLInputElement>
+  ) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setPhotoError("Please choose an image file (JPG, PNG or WebP).");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setPhotoError("Images must be 5 MB or smaller.");
+      return;
+    }
+    setPhotoUploading(true);
+    setPhotoError(null);
+    setPhotoUrl(null);
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setPhotoError("Session expired — please log in again.");
+        return;
+      }
+      const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+      const path = `${user.id}/${Date.now()}.${ext}`;
+      const { error } = await supabase.storage
+        .from("application-photos")
+        .upload(path, file, { contentType: file.type });
+      if (error) throw error;
+      const { data } = supabase.storage
+        .from("application-photos")
+        .getPublicUrl(path);
+      setPhotoUrl(data.publicUrl);
+    } catch {
+      setPhotoError("Upload failed — please try again.");
+    } finally {
+      setPhotoUploading(false);
+    }
+  }
 
   if (state?.success) {
     return (
@@ -126,6 +173,39 @@ export function ApplicationForm() {
           </p>
         </div>
         <div className="sm:col-span-2">
+          <label htmlFor="photo" className={labelClass}>
+            Stall photo
+          </label>
+          <input
+            id="photo"
+            name="photo"
+            type="file"
+            accept="image/*"
+            onChange={handlePhotoChange}
+            className="mt-1.5 block w-full text-sm text-ink file:mr-3 file:rounded-md file:border-0 file:bg-pine-700 file:px-3 file:py-2 file:text-sm file:font-medium file:text-paper hover:file:bg-pine-800"
+          />
+          {photoUploading && (
+            <p className="mt-1.5 text-xs text-ink/55">Uploading photo…</p>
+          )}
+          {photoUrl && (
+            <img
+              src={photoUrl}
+              alt="Stall photo preview"
+              className="mt-2 h-28 w-44 rounded-md object-cover"
+            />
+          )}
+          {photoError && (
+            <p role="alert" className="mt-1.5 text-xs text-berry-700">
+              {photoError}
+            </p>
+          )}
+          <p className="mt-1.5 text-xs text-ink/55">
+            A photo of your stall or products (JPG/PNG, up to 5 MB). Shown on
+            your public listing once approved.
+          </p>
+          <input type="hidden" name="image_url" value={photoUrl ?? ""} />
+        </div>
+        <div className="sm:col-span-2">
           <label htmlFor="pitch" className={labelClass}>
             Tell us about your stall
           </label>
@@ -148,10 +228,10 @@ export function ApplicationForm() {
 
       <button
         type="submit"
-        disabled={pending}
+        disabled={pending || photoUploading}
         className="rounded-md bg-berry-600 px-6 py-3 text-sm font-medium text-paper transition-colors hover:bg-berry-700 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-berry-600"
       >
-        {pending ? "Sending…" : "Submit application"}
+        {pending || photoUploading ? "Sending…" : "Submit application"}
       </button>
     </form>
   );

@@ -44,7 +44,7 @@ export async function reviewApplicationAction(formData: FormData) {
 
   const { data: applicationRow } = await supabase
     .from("applications")
-    .select("id, user_id, business_name, category, pitch, price_info, status, email, phone")
+    .select("id, user_id, business_name, category, pitch, price_info, image_url, status, email, phone")
     .eq("id", id)
     .single();
   const application = applicationRow as {
@@ -54,6 +54,7 @@ export async function reviewApplicationAction(formData: FormData) {
     category: string;
     pitch: string;
     price_info: string | null;
+    image_url: string | null;
     status: string;
     email: string;
     phone: string | null;
@@ -85,6 +86,7 @@ export async function reviewApplicationAction(formData: FormData) {
       contact_email: application.email,
       contact_phone: application.phone,
       price_info: application.price_info,
+      image_url: application.image_url,
       approved: true,
     });
   }
