@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 
-export type AuthFormState = { error?: string } | null;
+export type AuthFormState = { error?: string; message?: string } | null;
 
 export async function signInAction(
   _prev: AuthFormState,
@@ -58,7 +58,7 @@ export async function signUpAction(
   // Email confirmation enabled: no session yet, ask the user to check inbox.
   if (!data.session) {
     return {
-      error:
+      message:
         "Account created. Check your inbox to confirm your email, then log in.",
     };
   }

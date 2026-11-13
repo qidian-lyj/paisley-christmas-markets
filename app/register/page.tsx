@@ -24,6 +24,14 @@ export default function RegisterPage() {
             {state.error}
           </p>
         )}
+        {state?.message && (
+          <p
+            role="status"
+            className="rounded-md border border-pine-700/40 bg-pine-700/10 px-4 py-3 text-sm text-pine-800"
+          >
+            {state.message}
+          </p>
+        )}
 
         <div>
           <label htmlFor="full_name" className={labelClass}>
