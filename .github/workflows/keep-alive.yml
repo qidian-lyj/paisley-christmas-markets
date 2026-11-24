@@ -11,10 +11,11 @@ on:
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 5 # hard stop so a hung request can never wedge the job
     steps:
       - name: Ping live site (SSR pages read from Supabase)
         run: |
           for path in "" /events /traders /apply; do
-            code=$(curl -sS -o /dev/null -w "%{http_code}" "https://paisley-christmas-markets.vercel.app${path}")
+            code=$(curl -sS --max-time 30 -o /dev/null -w "%{http_code}" "https://paisley-christmas-markets.vercel.app${path}")
             echo "${path:-/} -> ${code}"
           done
